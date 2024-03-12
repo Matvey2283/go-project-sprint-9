@@ -3,114 +3,116 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
 
 // Generator генерирует последовательность чисел 1,2,3 и т.д. и
-// вызывает переданную функцию для каждого из
+// отправляет их в канал ch. При этом после записи в канал для каждого числа
+// вызывается функция fn. Она служит для подсчёта количества и суммы
 // сгенерированных чисел.
 func Generator(ctx context.Context, ch chan<- int64, fn func(int64)) {
-	// 1. Функция Generator
-	var val int64 = 1
 	defer close(ch)
+	var i int64
 	for {
+		i++
 		select {
 		case <-ctx.Done():
 			return
-		default:
-			ch <- val
-			fn(val)
-			val++
+		case ch <- i:
+			fn(i)
 		}
 	}
 }
 
 // Worker читает число из канала in и пишет его в канал out.
-func Worker(in <-chan int64, out chan<- int64) {
-	// 2. Функция Worker
+func Worker(in <-chan int64, out chan<- int64, done <-chan struct{}) {
 	defer close(out)
 	for {
-		v, ok := <-in
-		if !ok {
-			break
+		select {
+		case num, ok := <-in:
+			if !ok {
+				return
+			}
+			out <- num
+			time.Sleep(1 * time.Millisecond) // Можно убрать это для ускорения обработки
+		case <-done:
+			return
 		}
-		out <- v
-		time.Sleep(time.Millisecond)
 	}
 }
 
-var mu sync.Mutex
-
 func main() {
 	chIn := make(chan int64)
-	// 3. Создание контекста
+
+	// Создание контекста
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
-	// для проверки будем считать количество и сумму отправленных чисел
 	var inputSum int64   // сумма сгенерированных чисел
 	var inputCount int64 // количество сгенерированных чисел
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 
 	// генерируем числа, считая параллельно их количество и сумму
 	go Generator(ctx, chIn, func(i int64) {
 		mu.Lock()
+		defer mu.Unlock()
 		inputSum += i
 		inputCount++
-		mu.Unlock()
 	})
 
 	const NumOut = 5 // количество обрабатывающих горутин и каналов
 	outs := make([]chan int64, NumOut)
-	for i := range outs {
-		outs[i] = make(chan int64)
-		go Worker(chIn, outs[i])
-	}
+	done := make(chan struct{}) // канал для оповещения горутин о завершении работы
+	defer close(done)
 
-	chOut := make(chan int64)
-	go func() { // сливаем все outs в один канал chOut
-		defer close(chOut)
-		wg := sync.WaitGroup{}
-		wg.Add(NumOut)
-		for _, out := range outs {
-			go func(out <-chan int64) {
-				for v := range out {
-					chOut <- v
-				}
-				wg.Done()
-			}(out)
-		}
-		wg.Wait()
-	}()
-
-	var wg sync.WaitGroup
-	// 4. Собираем числа из каналов outs
 	for i := 0; i < NumOut; i++ {
+		outs[i] = make(chan int64)
 		wg.Add(1)
-		go func(in <-chan int64, i int64) {
+		go func(in <-chan int64, out chan<- int64, amounts []int64) {
 			defer wg.Done()
-			for n := range in {
+			for num := range in {
+				out <- num
 				amounts[i]++
-				chOut <- n
 			}
-		}(outs[i], int64(i))
+		}(chIn, outs[i], amounts)
 	}
+
+	amounts := make([]int64, NumOut)
+	chOut := make(chan int64, NumOut)
 
 	go func() {
-		// ждём завершения работы всех горутин для outs
 		wg.Wait()
-		close(chIn)
+		close(chOut)
 	}()
 
-	var count int64 // количество числе результирующего канала
+	go func() {
+		for _, in := range outs {
+			for num := range in {
+				chOut <- num
+			}
+		}
+	}()
+
+	var count int64 // количество чисел результирующего канала
 	var sum int64   // сумма чисел результирующего канала
 
-	// 5. Читаем числа из результирующего канала
-	for v := range chOut {
+	for num := range chOut {
 		count++
-		sum += v
+		sum += num
 	}
 
 	fmt.Println("Количество чисел", inputCount, count)
 	fmt.Println("Сумма чисел", inputSum, sum)
+	fmt.Println("Разбивка по каналам", amounts)
+
+	if inputSum != sum {
+		log.Fatalf("Ошибка: суммы чисел не равны: %d != %d\n", inputSum, sum)
+	}
+	if inputCount != count {
+		log.Fatalf("Ошибка: количество чисел не равно: %d != %d\n", inputCount, count)
+	}
 }
