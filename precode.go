@@ -30,6 +30,7 @@ func Generator(ctx context.Context, ch chan<- int64, fn func(int64)) {
 // Worker читает число из канала in и пишет его в канал out.
 func Worker(in <-chan int64, out chan<- int64, wg *sync.WaitGroup) {
 	defer wg.Done()
+	defer close(out) // Закрываем канал out после завершения работы
 	for i := range in {
 		out <- i
 	}
@@ -60,8 +61,8 @@ func main() {
 		outs[i] = make(chan int64)
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(NumOut)
+	// var wg sync.WaitGroup
+	// wg.Add(NumOut)
 
 	// amounts — слайс, в который собирается статистика по горутинам
 	amounts := make([]int64, NumOut)
@@ -71,21 +72,40 @@ func main() {
 
 	// Запускаем горутины Worker
 	for i := 0; i < NumOut; i++ {
-		go Worker(chIn, outs[i], &wg)
+		go Worker(chIn, outs[i], &sync.WaitGroup{}) // Убрать WaitGroup
 	}
 
 	// Собираем числа из каналов outs
 	go func() {
+		var wg sync.WaitGroup
+		wg.Add(NumOut)
+		defer close(chOut)
+
+		for i := 0; i < NumOut; i++ {
+			go func(idx int) {
+				defer wg.Done()
+				for val := range outs[idx] {
+					chOut <- val
+				}
+			}(i)
+		}
+
 		wg.Wait()
-		close(chOut)
 	}()
 
 	for i := 0; i < NumOut; i++ {
 		go func(idx int) {
+			// for val := range outs[idx] {
+			// 	chOut <- val
+			// 	amounts[idx]++
+			// }
+			// Заменить на использование WaitGroup
+			var wg sync.WaitGroup
 			for val := range outs[idx] {
 				chOut <- val
 				amounts[idx]++
 			}
+			wg.Done()
 		}(i)
 	}
 
