@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math/rand"
 	"sync"
 	"time"
 )
@@ -14,16 +13,16 @@ import (
 // вызывается функция fn. Она служит для подсчёта количества и суммы
 // сгенерированных чисел.
 func Generator(ctx context.Context, ch chan<- int64, fn func(int64)) {
-	rand.Seed(time.Now().UnixNano())
-	n := int64(0)
+	n := int64(1)
 	for {
 		select {
 		case <-ctx.Done():
+			close(ch) // закрываем канал после завершения работы генератора
 			return
 		default:
-			n++
 			fn(n)
 			ch <- n
+			n++
 		}
 	}
 }
