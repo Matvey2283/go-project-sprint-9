@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"sync"
-	"time"
 )
 
 // Generator генерирует последовательность чисел 1, 2, 3 и т.д. и
@@ -27,11 +26,11 @@ func Generator(ctx context.Context, ch chan<- int64, fn func(int64)) {
 }
 
 // Worker читает число из канала in и пишет его в канал out.
-func Worker(in <-chan int64, out chan<- int64) {
-	defer close(out) // закрываем канал при выходе из функции
+func Worker(in <-chan int64, out chan<- int64, wgStat *sync.WaitGroup) {
+	defer wgStat.Done() // уменьшаем счетчик группы, когда завершаем работу
+	defer close(out)    // закрываем канал при выходе из функции
 	for v := range in {
 		out <- v
-		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -39,7 +38,7 @@ func main() {
 	chIn := make(chan int64)
 
 	// 3. Создание контекста
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// для проверки будем считать количество и сумму отправленных чисел
@@ -62,7 +61,15 @@ func main() {
 	for i := 0; i < NumOut; i++ {
 		// создаём каналы и для каждого из них вызываем горутину Worker
 		outs[i] = make(chan int64)
-		go Worker(chIn, outs[i])
+	}
+
+	// wgStat используется для отслеживания завершения всех горутин Worker
+	var wgStat sync.WaitGroup
+	wgStat.Add(NumOut)
+
+	// запускаем обработчики чисел
+	for i := 0; i < NumOut; i++ {
+		go Worker(chIn, outs[i], &wgStat)
 	}
 
 	// amounts — слайс, в который собирается статистика по горутинам
@@ -72,7 +79,6 @@ func main() {
 	chOut := make(chan int64, NumOut)
 
 	var wg sync.WaitGroup
-	var wgStat sync.WaitGroup
 
 	// 4. Собираем числа из каналов outs
 	for i, out := range outs {
@@ -89,12 +95,10 @@ func main() {
 	}
 
 	go func() {
-		// ждём завершения работы всех горутин для outs
+		// ждём завершения работы всех горутин для сбора статистики
 		wg.Wait()
 		// закрываем результирующий канал
 		close(chOut)
-		// ждём завершения работы всех горутин для сбора статистики
-		wgStat.Wait()
 	}()
 
 	var count int64 // количество чисел результирующего канала
